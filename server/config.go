@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/heroiclabs/nakama-common/runtime"
 	"github.com/heroiclabs/nakama/v3/flags"
@@ -55,6 +56,7 @@ type Config interface {
 	GetStorage() *StorageConfig
 	GetMFA() *MFAConfig
 	GetParty() *PartyConfig
+	GetCluster() *ClusterConfig
 	GetLimit() int
 
 	Clone() (Config, error)
@@ -486,6 +488,7 @@ type config struct {
 	Storage          *StorageConfig     `yaml:"storage" json:"storage" usage:"Storage settings."`
 	MFA              *MFAConfig         `yaml:"mfa" json:"mfa" usage:"MFA settings."`
 	Party            *PartyConfig       `yaml:"party" json:"party" usage:"Party settings."`
+	Cluster          *ClusterConfig     `yaml:"cluster" json:"cluster" usage:"Cluster settings."`
 	Limit            int                `json:"-"` // Only used for migrate command.
 }
 
@@ -517,6 +520,7 @@ func NewConfig(logger *zap.Logger) *config {
 		Storage:          NewStorageConfig(),
 		Party:            NewPartyConfig(),
 		MFA:              NewMFAConfig(),
+		Cluster:          NewClusterConfig(),
 
 		Limit: -1,
 	}
@@ -549,6 +553,7 @@ func (c *config) Clone() (Config, error) {
 		GoogleAuth:       c.GoogleAuth.Clone(),
 		Storage:          c.Storage.Clone(),
 		MFA:              c.MFA.Clone(),
+		Cluster:          c.Cluster.Clone(),
 		Limit:            c.Limit,
 	}
 
@@ -637,6 +642,10 @@ func (c *config) GetParty() *PartyConfig {
 
 func (c *config) GetMFA() *MFAConfig {
 	return c.MFA
+}
+
+func (c *config) GetCluster() *ClusterConfig {
+	return c.Cluster
 }
 
 func (c *config) GetRuntimeConfig() (runtime.Config, error) {
@@ -1647,5 +1656,38 @@ func NewPartyConfig() *PartyConfig {
 	return &PartyConfig{
 		LabelUpdateIntervalMs: 1_000,
 		IdleCheckIntervalMs:   30_000,
+	}
+}
+
+type ClusterConfig struct {
+	Enabled                bool          `yaml:"enabled" json:"enabled" usage:"Enable cluster mode."`
+	GossipPort             int           `yaml:"gossip_port" json:"gossip_port" usage:"Port for gossip protocol."`
+	JoinAddrs              []string      `yaml:"join_addrs" json:"join_addrs" usage:"Seed node addresses."`
+	MetaInterval           time.Duration `yaml:"meta_interval" json:"meta_interval" usage:"Node metadata broadcast interval."`
+	MatchmakerSyncInterval time.Duration `yaml:"matchmaker_sync_interval" json:"matchmaker_sync_interval" usage:"Matchmaker full sync interval."`
+	MatchIndexSyncInterval time.Duration `yaml:"match_index_sync_interval" json:"match_index_sync_interval" usage:"Match/Party index sync interval."`
+	RequestTimeout         time.Duration `yaml:"request_timeout" json:"request_timeout" usage:"Cross-node RPC timeout."`
+}
+
+func (cfg *ClusterConfig) Clone() *ClusterConfig {
+	if cfg == nil {
+		return nil
+	}
+
+	cfgCopy := *cfg
+	cfgCopy.JoinAddrs = make([]string, len(cfg.JoinAddrs))
+	copy(cfgCopy.JoinAddrs, cfg.JoinAddrs)
+	return &cfgCopy
+}
+
+func NewClusterConfig() *ClusterConfig {
+	return &ClusterConfig{
+		Enabled:                false,
+		GossipPort:             7352,
+		JoinAddrs:              []string{},
+		MetaInterval:           5 * time.Second,
+		MatchmakerSyncInterval: 10 * time.Second,
+		MatchIndexSyncInterval: 10 * time.Second,
+		RequestTimeout:         5 * time.Second,
 	}
 }
