@@ -15,6 +15,17 @@ import (
 
 type ClusterMessageHandler func(msg *ClusterMessage)
 
+// ClusterClient is the interface used by distributed components to interact with the cluster.
+type ClusterClient interface {
+	Broadcast(msgType ClusterMessageType, payload []byte)
+	SendTo(nodeName string, msgType ClusterMessageType, payload []byte) error
+	Request(nodeName string, msgType ClusterMessageType, payload []byte) ([]byte, error)
+	Reply(msg *ClusterMessage, response []byte)
+	RegisterHandler(msgType ClusterMessageType, handler ClusterMessageHandler)
+	OnNodeLeave(fn func(string))
+	MemberNames() []string
+}
+
 type Cluster struct {
 	logger          *zap.Logger
 	node            string
