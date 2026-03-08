@@ -31,6 +31,7 @@ type ClusterMessage struct {
 	Type       ClusterMessageType
 	SourceNode string
 	Payload    []byte
+	RequestID  uuid.UUID // populated only for request messages, used by Reply()
 }
 
 func (m *ClusterMessage) Encode() []byte {
