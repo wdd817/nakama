@@ -186,6 +186,19 @@ func main() {
 	statusRegistry := server.NewLocalStatusRegistry(logger, config, sessionRegistry, jsonpbMarshaler)
 	tracker := server.StartLocalTracker(logger, config, sessionRegistry, statusRegistry, metrics, jsonpbMarshaler)
 	router := server.NewLocalMessageRouter(sessionRegistry, tracker, jsonpbMarshaler)
+
+	// Cluster initialization
+	var cluster *server.Cluster
+	if config.GetCluster().Enabled {
+		var clusterErr error
+		cluster, clusterErr = server.NewCluster(logger, config.GetName(), config.GetCluster())
+		if clusterErr != nil {
+			startupLogger.Fatal("Failed to start cluster", zap.Error(clusterErr))
+		}
+		defer cluster.Stop()
+		startupLogger.Info("Cluster mode enabled", zap.String("node", config.GetName()), zap.Int("gossip_port", config.GetCluster().GossipPort))
+	}
+
 	leaderboardCache := server.NewLocalLeaderboardCache(ctx, logger, startupLogger, db)
 	leaderboardRankCache := server.NewLocalLeaderboardRankCache(ctx, startupLogger, db, config.GetLeaderboard(), leaderboardCache)
 	leaderboardScheduler := server.NewLocalLeaderboardScheduler(logger, db, config, leaderboardCache, leaderboardRankCache)
@@ -209,6 +222,38 @@ func main() {
 	tracker.SetPartyJoinListener(partyRegistry.Join)
 	tracker.SetPartyLeaveListener(partyRegistry.Leave)
 
+	// Distributed wiring: wrap Local* with Distributed* when cluster is enabled.
+	var (
+		activeTracker       server.Tracker        = tracker
+		activeRouter        server.MessageRouter   = router
+		activeMatchmaker    server.Matchmaker      = matchmaker
+		activeMatchRegistry server.MatchRegistry   = matchRegistry
+		activePartyRegistry server.PartyRegistry   = partyRegistry
+		activeStreamManager server.StreamManager   = streamManager
+		activeStatusHandler server.StatusHandler
+	)
+
+	if cluster != nil {
+		distTracker := server.NewDistributedTracker(cluster, config.GetName())
+		distRouter := server.NewDistributedMessageRouter(logger, router, cluster, config.GetName())
+		distMatchRegistry := server.NewDistributedMatchRegistry(logger, matchRegistry, cluster, config.GetName())
+		distMatchmaker := server.NewDistributedMatchmaker(logger, matchmaker, cluster, config.GetName(), config.GetCluster().MatchmakerSyncInterval)
+		distPartyRegistry := server.NewDistributedPartyRegistry(logger, partyRegistry, cluster, config.GetName())
+		distStreamManager := server.NewDistributedStreamManager(logger, streamManager, cluster, config.GetName())
+
+		activeRouter = distRouter
+		activeMatchmaker = distMatchmaker
+		activeMatchRegistry = distMatchRegistry
+		activePartyRegistry = distPartyRegistry
+		activeStreamManager = distStreamManager
+
+		// DistributedTracker is a companion, not a full Tracker replacement.
+		// The local tracker remains the activeTracker; distributed tracker handles remote presence sync.
+		_ = distTracker
+
+		startupLogger.Info("Distributed components initialized")
+	}
+
 	storageIndex.RegisterFilters(runtime)
 	go func() {
 		if err = storageIndex.Load(ctx); err != nil {
@@ -218,15 +263,20 @@ func main() {
 
 	leaderboardScheduler.Start(runtime)
 
-	pipeline := server.NewPipeline(logger, config, db, jsonpbMarshaler, jsonpbUnmarshaler, sessionRegistry, statusRegistry, matchRegistry, partyRegistry, matchmaker, tracker, router, runtime, metrics)
-	statusHandler := server.NewLocalStatusHandler(logger, sessionRegistry, matchRegistry, partyRegistry, tracker, metrics, config.GetName(), createTime)
+	pipeline := server.NewPipeline(logger, config, db, jsonpbMarshaler, jsonpbUnmarshaler, sessionRegistry, statusRegistry, activeMatchRegistry, activePartyRegistry, activeMatchmaker, activeTracker, activeRouter, runtime, metrics)
+	statusHandler := server.NewLocalStatusHandler(logger, sessionRegistry, activeMatchRegistry, activePartyRegistry, activeTracker, metrics, config.GetName(), createTime)
+	if cluster != nil {
+		activeStatusHandler = server.NewDistributedStatusHandler(logger, statusHandler, cluster, config.GetName())
+	} else {
+		activeStatusHandler = statusHandler
+	}
 
 	telemetryEnabled := os.Getenv("NAKAMA_TELEMETRY") != "0"
 	console.UIFS.Nt = !telemetryEnabled
 	cookie := newOrLoadCookie(telemetryEnabled, config)
 
-	apiServer := server.StartApiServer(logger, startupLogger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, version, socialClient, storageIndex, leaderboardCache, leaderboardRankCache, sessionRegistry, sessionCache, statusRegistry, matchRegistry, partyRegistry, matchmaker, tracker, router, streamManager, metrics, pipeline, runtime)
-	consoleServer := server.StartConsoleServer(logger, startupLogger, db, config, tracker, router, streamManager, metrics, sessionRegistry, sessionCache, consoleSessionCache, loginAttemptCache, statusRegistry, statusHandler, runtimeInfo, matchRegistry, configWarnings, semver, leaderboardCache, leaderboardRankCache, leaderboardScheduler, storageIndex, apiServer, runtime, cookie)
+	apiServer := server.StartApiServer(logger, startupLogger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, version, socialClient, storageIndex, leaderboardCache, leaderboardRankCache, sessionRegistry, sessionCache, statusRegistry, activeMatchRegistry, activePartyRegistry, activeMatchmaker, activeTracker, activeRouter, activeStreamManager, metrics, pipeline, runtime)
+	consoleServer := server.StartConsoleServer(logger, startupLogger, db, config, activeTracker, activeRouter, activeStreamManager, metrics, sessionRegistry, sessionCache, consoleSessionCache, loginAttemptCache, statusRegistry, activeStatusHandler, runtimeInfo, activeMatchRegistry, configWarnings, semver, leaderboardCache, leaderboardRankCache, leaderboardScheduler, storageIndex, apiServer, runtime, cookie)
 
 	if telemetryEnabled {
 		const telemetryKey = "YU1bIKUhjQA9WC0O6ouIRIWTaPlJ5kFs"
@@ -245,7 +295,7 @@ func main() {
 	// Wait for a termination signal.
 	<-c
 
-	server.HandleShutdown(ctx, logger, matchRegistry, config.GetShutdownGraceSec(), runtime.Shutdown(), c)
+	server.HandleShutdown(ctx, logger, activeMatchRegistry, config.GetShutdownGraceSec(), runtime.Shutdown(), c)
 
 	// Signal cancellation to the global runtime context.
 	ctxCancelFn()
@@ -253,7 +303,7 @@ func main() {
 	// Gracefully stop remaining server components.
 	apiServer.Stop()
 	consoleServer.Stop()
-	matchmaker.Stop()
+	activeMatchmaker.Stop()
 	leaderboardScheduler.Stop()
 	tracker.Stop()
 	statusRegistry.Stop()
